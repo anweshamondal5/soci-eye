@@ -1,9 +1,30 @@
 /**
  * Soci-Eye Frontend API Service
  * Handles communication with the FastAPI backend
+ * Robust URL resolver supporting both local development and Render/Vercel production
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+function getApiBaseUrl() {
+  const envUrl = import.meta.env.VITE_API_URL;
+  
+  if (envUrl && envUrl !== 'undefined' && envUrl !== 'null' && envUrl.trim()) {
+    let clean = envUrl.trim().replace(/\/+$/, '');
+    if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+      clean = `https://${clean}`;
+    }
+    return clean;
+  }
+
+  // Automatic production resolution when hosted on onrender.com
+  if (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')) {
+    return 'https://soci-eye-backend.onrender.com';
+  }
+
+  // Local development default
+  return 'http://localhost:8000';
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 export async function analyzeTopic(topic) {
   const cleanTopic = topic.trim();
@@ -12,12 +33,20 @@ export async function analyzeTopic(topic) {
   }
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/analyze?topic=${encodeURIComponent(cleanTopic)}`, {
+    const url = `${API_BASE_URL}/api/analyze?topic=${encodeURIComponent(cleanTopic)}`;
+    const response = await fetch(url, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
       }
     });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await response.text();
+      console.error("Non-JSON response received:", text.slice(0, 300));
+      throw new Error(`Server returned non-JSON response from ${API_BASE_URL}. Please ensure the backend is running.`);
+    }
 
     const data = await response.json();
 
@@ -28,9 +57,8 @@ export async function analyzeTopic(topic) {
     return data;
   } catch (error) {
     console.error("API Error during analysis:", error);
-    // If backend is unreachable
     if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-      throw new Error("Cannot connect to Soci-Eye backend server. Make sure the backend is running on http://localhost:8000.");
+      throw new Error(`Cannot connect to Soci-Eye backend at ${API_BASE_URL}. The server may be waking up from sleep. Please retry in a few seconds.`);
     }
     throw error;
   }
@@ -38,13 +66,18 @@ export async function analyzeTopic(topic) {
 
 export async function checkBackendHealth() {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/health`, {
+    const url = `${API_BASE_URL}/api/health`;
+    const response = await fetch(url, {
       method: 'GET',
       headers: { 'Accept': 'application/json' }
     });
     if (!response.ok) return null;
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return null;
     return await response.json();
   } catch (err) {
     return null;
   }
 }
+
+export { API_BASE_URL };

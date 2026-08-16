@@ -32,7 +32,4 @@ services:
         destination: /index.html
     envVars:
       - key: VITE_API_URL
-        fromService:
-          type: web
-          name: soci-eye-backend
-          property: host
+        value: https://soci-eye-backend.onrender.com
