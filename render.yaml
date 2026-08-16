@@ -1,12 +1,12 @@
 services:
-  # FastAPI Backend Web Service
+  # 1. FastAPI Backend Python Web Service (Free Tier)
   - type: web
     name: soci-eye-backend
     runtime: python
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    plan: free
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -19,14 +19,12 @@ services:
       - key: GEMINI_API_KEY
         sync: false
 
-  # React Vite Frontend Static Site
-  - type: web
+  # 2. React + Vite Frontend Static Site (Free Global CDN)
+  - type: static
     name: soci-eye-frontend
-    runtime: static
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
-    plan: free
     routes:
       - type: rewrite
         source: /*
