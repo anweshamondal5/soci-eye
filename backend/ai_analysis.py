@@ -2,6 +2,7 @@
 Soci-Eye AI Analysis Engine
 Communicates with Google Gemini API for multilingual sentiment classification,
 strict relevance filtering, dynamic domain aspect extraction, and grounded AI insight synthesis.
+Supports both classic ('AIza...') and current Google AI Studio authentication keys ('AQ...').
 """
 
 import json
@@ -47,17 +48,27 @@ Output valid JSON matching this exact schema:
 class AIAnalysisService:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY
-        self.model = "gemini-1.5-flash"
+        self.models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+
+    def _get_headers(self) -> Dict[str, str]:
+        """
+        Returns standard authentication headers supporting both AIza and AQ key formats.
+        """
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if self.api_key:
+            headers["x-goog-api-key"] = self.api_key
+        return headers
 
     async def analyze_batch_with_gemini(self, topic: str, comments_text_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Calls Google Gemini API via REST with structured JSON format to evaluate comments.
+        Uses x-goog-api-key header for seamless support of Google's new AQ key format.
         """
         if not self.api_key:
             return []
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        
         # Prepare indexed prompt payload
         comments_payload = []
         for idx, c in enumerate(comments_text_list):
@@ -88,42 +99,52 @@ class AIAnalysisService:
             }
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                response = await client.post(url, json=request_body)
-                
-                if response.status_code != 200:
-                    logger.error(f"Gemini API returned status {response.status_code}: {response.text}")
-                    return []
+        headers = self._get_headers()
 
-                res_json = response.json()
-                candidates = res_json.get("candidates", [])
-                if not candidates:
-                    logger.warning("No candidates returned from Gemini.")
-                    return []
+        # Try models in order (1.5-flash -> 2.0-flash)
+        for model in self.models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            try:
+                async with httpx.AsyncClient(timeout=25.0) as client:
+                    response = await client.post(url, headers=headers, json=request_body)
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"Gemini API ({model}) returned {response.status_code}: {response.text[:200]}")
+                        continue
 
-                content_parts = candidates[0].get("content", {}).get("parts", [])
-                if not content_parts:
-                    return []
+                    res_json = response.json()
+                    candidates = res_json.get("candidates", [])
+                    if not candidates:
+                        continue
 
-                raw_text = content_parts[0].get("text", "").strip()
-                # Safely strip markdown fences if present
-                clean_json_str = raw_text
-                if clean_json_str.startswith("```"):
-                    clean_json_str = re.sub(r"^```(?:json)?\s*", "", clean_json_str, flags=re.IGNORECASE)
-                    clean_json_str = re.sub(r"\s*```$", "", clean_json_str)
-                try:
-                    parsed = json.loads(clean_json_str)
-                except Exception:
-                    match = re.search(r"(\{.*\}|\[.*\])", clean_json_str, re.DOTALL)
-                    if match:
-                        parsed = json.loads(match.group(1))
-                    else:
-                        raise
-                return parsed.get("analyzed_items", [])
-        except Exception as exc:
-            logger.error(f"Error calling Gemini API: {exc}")
-            return []
+                    content_parts = candidates[0].get("content", {}).get("parts", [])
+                    if not content_parts:
+                        continue
+
+                    raw_text = content_parts[0].get("text", "").strip()
+                    # Safely strip markdown fences if present
+                    clean_json_str = raw_text
+                    if clean_json_str.startswith("```"):
+                        clean_json_str = re.sub(r"^```(?:json)?\s*", "", clean_json_str, flags=re.IGNORECASE)
+                        clean_json_str = re.sub(r"\s*```$", "", clean_json_str)
+                    try:
+                        parsed = json.loads(clean_json_str)
+                    except Exception:
+                        match = re.search(r"(\{.*\}|\[.*\])", clean_json_str, re.DOTALL)
+                        if match:
+                            parsed = json.loads(match.group(1))
+                        else:
+                            raise
+                    
+                    items = parsed.get("analyzed_items", [])
+                    if items:
+                        return items
+            except Exception as exc:
+                logger.warning(f"Error calling Gemini model {model}: {exc}")
+                continue
+
+        logger.error("All Gemini models failed or returned no results.")
+        return []
 
     async def generate_insight_with_gemini(self, topic: str, pos_pct: int, neu_pct: int, neg_pct: int, key_topics: List[Dict[str, Any]]) -> str:
         """
@@ -132,8 +153,6 @@ class AIAnalysisService:
         if not self.api_key:
             return ""
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        
         prompt = (
             f"Generate a concise, 2-sentence executive social intelligence summary for topic '{topic}'.\n"
             f"Data:\n"
@@ -152,16 +171,22 @@ class AIAnalysisService:
             "generationConfig": {"temperature": 0.3}
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json=request_body)
-                if response.status_code == 200:
-                    candidates = response.json().get("candidates", [])
-                    if candidates:
-                        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                        return text
-        except Exception as exc:
-            logger.warning(f"Error generating AI insight with Gemini: {exc}")
+        headers = self._get_headers()
+
+        for model in self.models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(url, headers=headers, json=request_body)
+                    if response.status_code == 200:
+                        candidates = response.json().get("candidates", [])
+                        if candidates:
+                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                            if text:
+                                return text
+            except Exception as exc:
+                logger.warning(f"Error generating AI insight with Gemini model {model}: {exc}")
+                continue
         return ""
 
     async def analyze_social_intelligence(self, topic: str, raw_comments: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -172,7 +197,7 @@ class AIAnalysisService:
             logger.info("No raw comments available, using dynamic fallback engine.")
             return generate_dynamic_fallback(topic)
 
-        # Batch comments to Gemini (up to 40 comments)
+        # Batch comments to Gemini (up to 35 comments)
         analyzed_items = []
         batch_size = 35
         for i in range(0, min(len(raw_comments), batch_size), batch_size):
@@ -180,7 +205,7 @@ class AIAnalysisService:
             items = await self.analyze_batch_with_gemini(topic, chunk)
             analyzed_items.extend(items)
 
-        # If Gemini returned no results (e.g. key missing/rate limit), use fallback
+        # If Gemini returned no results (e.g. rate limit/network drop), use dynamic intelligence
         if not analyzed_items:
             logger.info("Gemini analysis yielded no results, applying fallback engine.")
             return generate_dynamic_fallback(topic)
