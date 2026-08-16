@@ -20,8 +20,9 @@ services:
         sync: false
 
   # 2. React + Vite Frontend Static Site (Free Global CDN)
-  - type: static
+  - type: web
     name: soci-eye-frontend
+    runtime: static
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
