@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+import httpx
 
 from config import settings
 from youtube import youtube_service
@@ -60,6 +61,64 @@ async def health_check():
         "timestamp": time.time()
     }
 
+@app.get("/api/debug-pipeline")
+async def debug_pipeline():
+    """
+    Diagnostic endpoint that executes real test calls to YouTube and Gemini
+    and returns exact HTTP status codes and error messages (without exposing keys).
+    """
+    yt_key = settings.YOUTUBE_API_KEY
+    gm_key = settings.GEMINI_API_KEY
+
+    diagnostics = {
+        "youtube_key_configured": bool(yt_key and not yt_key.startswith("YOUR_")),
+        "youtube_key_prefix": yt_key[:4] + "..." if yt_key else "None",
+        "gemini_key_configured": bool(gm_key and not gm_key.startswith("YOUR_")),
+        "gemini_key_prefix": gm_key[:4] + "..." if gm_key else "None",
+        "youtube_test": {},
+        "gemini_test": {}
+    }
+
+    # Test YouTube
+    if yt_key:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                yt_res = await client.get(
+                    "https://www.googleapis.com/youtube/v3/search",
+                    params={"part": "snippet", "q": "test", "type": "video", "maxResults": 1, "key": yt_key}
+                )
+                diagnostics["youtube_test"]["status_code"] = yt_res.status_code
+                if yt_res.status_code == 200:
+                    diagnostics["youtube_test"]["result"] = "SUCCESS: YouTube Data API is functional."
+                else:
+                    diagnostics["youtube_test"]["error"] = yt_res.json().get("error", {}).get("message", yt_res.text[:200])
+        except Exception as exc:
+            diagnostics["youtube_test"]["exception"] = str(exc)
+
+    # Test Gemini
+    if gm_key:
+        try:
+            headers = {"Content-Type": "application/json", "x-goog-api-key": gm_key}
+            payload = {"contents": [{"parts": [{"text": "Reply with 'OK'"}]}]}
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                gm_res = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gm_key}",
+                    headers=headers,
+                    json=payload
+                )
+                diagnostics["gemini_test"]["status_code"] = gm_res.status_code
+                if gm_res.status_code == 200:
+                    diagnostics["gemini_test"]["result"] = "SUCCESS: Gemini API is functional."
+                else:
+                    try:
+                        diagnostics["gemini_test"]["error"] = gm_res.json().get("error", {}).get("message", gm_res.text[:200])
+                    except Exception:
+                        diagnostics["gemini_test"]["error"] = gm_res.text[:200]
+        except Exception as exc:
+            diagnostics["gemini_test"]["exception"] = str(exc)
+
+    return diagnostics
+
 @app.get("/api/analyze")
 async def analyze_topic_get(topic: str = Query(..., min_length=1, description="Topic to analyze")):
     """
@@ -72,7 +131,6 @@ async def analyze_topic_get(topic: str = Query(..., min_length=1, description="T
     logger.info(f"Received analysis request for topic: '{clean_topic}'")
 
     try:
-        # If both live keys are present, execute the full real-time pipeline
         if settings.has_youtube_key and settings.has_gemini_key:
             try:
                 logger.info(f"[Pipeline] Starting live retrieval for '{clean_topic}' using YouTube and Gemini...")
@@ -87,12 +145,15 @@ async def analyze_topic_get(topic: str = Query(..., min_length=1, description="T
                     return result
                 else:
                     logger.warning(f"[Pipeline] YouTube returned 0 comments for '{clean_topic}'. Using dynamic intelligence.")
-                    return generate_dynamic_fallback(clean_topic)
+                    fallback = generate_dynamic_fallback(clean_topic)
+                    fallback["debug_pipeline_note"] = "YouTube search returned 0 comments or API rejected request."
+                    return fallback
             except Exception as live_err:
                 logger.error(f"[Pipeline] Live pipeline error: {live_err}. Applying dynamic fallback.", exc_info=True)
-                return generate_dynamic_fallback(clean_topic)
+                fallback = generate_dynamic_fallback(clean_topic)
+                fallback["debug_pipeline_note"] = f"Pipeline exception: {type(live_err).__name__}: {str(live_err)}"
+                return fallback
         else:
-            # Keys not configured yet - deliver realistic dynamic topic intelligence
             logger.info("[Pipeline] Live API keys not configured. Serving dynamic topic intelligence engine.")
             return generate_dynamic_fallback(clean_topic)
 
@@ -100,7 +161,6 @@ async def analyze_topic_get(topic: str = Query(..., min_length=1, description="T
         raise
     except Exception as exc:
         logger.error(f"Unexpected server error during analysis: {exc}", exc_info=True)
-        # Friendly UI-safe response
         return JSONResponse(
             status_code=500,
             content={
