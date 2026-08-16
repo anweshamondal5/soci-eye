@@ -48,25 +48,19 @@ Output valid JSON matching this exact schema:
 class AIAnalysisService:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY
-        self.models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+        self.models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
 
-    def _get_headers(self) -> Dict[str, str]:
-        """
-        Returns standard authentication headers supporting both AIza and AQ key formats.
-        """
-        headers = {
-            "Content-Type": "application/json"
-        }
-        if self.api_key:
-            headers["x-goog-api-key"] = self.api_key
-        return headers
+    def _get_api_key(self) -> str:
+        return (self.api_key or settings.GEMINI_API_KEY or "").strip().strip("'").strip('"')
 
     async def analyze_batch_with_gemini(self, topic: str, comments_text_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Calls Google Gemini API via REST with structured JSON format to evaluate comments.
-        Uses x-goog-api-key header for seamless support of Google's new AQ key format.
+        Passes both x-goog-api-key header and query parameter for universal compatibility.
         """
-        if not self.api_key:
+        key = self._get_api_key()
+        if not key:
+            logger.warning("[Gemini] No GEMINI_API_KEY found.")
             return []
 
         # Prepare indexed prompt payload
@@ -74,7 +68,7 @@ class AIAnalysisService:
         for idx, c in enumerate(comments_text_list):
             comments_payload.append({
                 "index": idx,
-                "text": c.get("text", "")[:300] # Limit per comment length
+                "text": c.get("text", "")[:300]
             })
 
         user_content = (
@@ -99,19 +93,30 @@ class AIAnalysisService:
             }
         }
 
-        headers = self._get_headers()
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key
+        }
 
-        # Try models in order (1.5-flash -> 2.0-flash)
+        logger.info(f"[Gemini] Request started: analyzing {len(comments_payload)} comments for '{topic}'")
+
+        # Try models in sequence
         for model in self.models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            # Provide both header and query param for maximum Google API gateway compatibility
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
             try:
                 async with httpx.AsyncClient(timeout=25.0) as client:
                     response = await client.post(url, headers=headers, json=request_body)
                     
                     if response.status_code != 200:
-                        logger.warning(f"Gemini API ({model}) returned {response.status_code}: {response.text[:200]}")
+                        try:
+                            err_detail = response.json().get("error", {}).get("message", response.text[:200])
+                        except Exception:
+                            err_detail = response.text[:200]
+                        logger.warning(f"[Gemini] Model '{model}' returned HTTP {response.status_code}: {err_detail}")
                         continue
 
+                    logger.info(f"[Gemini] Model '{model}' returned HTTP 200 OK.")
                     res_json = response.json()
                     candidates = res_json.get("candidates", [])
                     if not candidates:
@@ -138,19 +143,21 @@ class AIAnalysisService:
                     
                     items = parsed.get("analyzed_items", [])
                     if items:
+                        logger.info(f"[Gemini] Successfully parsed {len(items)} classified items from '{model}'.")
                         return items
             except Exception as exc:
-                logger.warning(f"Error calling Gemini model {model}: {exc}")
+                logger.warning(f"[Gemini] Exception with model '{model}': {exc}")
                 continue
 
-        logger.error("All Gemini models failed or returned no results.")
+        logger.error("[Gemini] All models failed to produce analysis results.")
         return []
 
     async def generate_insight_with_gemini(self, topic: str, pos_pct: int, neu_pct: int, neg_pct: int, key_topics: List[Dict[str, Any]]) -> str:
         """
         Generates a concise 2-sentence summary grounded strictly in the data.
         """
-        if not self.api_key:
+        key = self._get_api_key()
+        if not key:
             return ""
 
         prompt = (
@@ -171,10 +178,13 @@ class AIAnalysisService:
             "generationConfig": {"temperature": 0.3}
         }
 
-        headers = self._get_headers()
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key
+        }
 
         for model in self.models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     response = await client.post(url, headers=headers, json=request_body)
@@ -183,9 +193,10 @@ class AIAnalysisService:
                         if candidates:
                             text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
                             if text:
+                                logger.info(f"[Gemini] Generated AI executive insight using '{model}'.")
                                 return text
             except Exception as exc:
-                logger.warning(f"Error generating AI insight with Gemini model {model}: {exc}")
+                logger.warning(f"[Gemini] Insight generation error with model '{model}': {exc}")
                 continue
         return ""
 
@@ -194,7 +205,7 @@ class AIAnalysisService:
         Complete processing pipeline for real YouTube comments + Gemini AI.
         """
         if not raw_comments:
-            logger.info("No raw comments available, using dynamic fallback engine.")
+            logger.info("[Pipeline] No raw comments available, serving dynamic fallback.")
             return generate_dynamic_fallback(topic)
 
         # Batch comments to Gemini (up to 35 comments)
@@ -205,9 +216,9 @@ class AIAnalysisService:
             items = await self.analyze_batch_with_gemini(topic, chunk)
             analyzed_items.extend(items)
 
-        # If Gemini returned no results (e.g. rate limit/network drop), use dynamic intelligence
+        # If Gemini returned no results, fall back
         if not analyzed_items:
-            logger.info("Gemini analysis yielded no results, applying fallback engine.")
+            logger.warning("[Pipeline] Gemini analysis returned 0 items, serving dynamic fallback.")
             return generate_dynamic_fallback(topic)
 
         # Merge analysis back into posts
@@ -247,6 +258,7 @@ class AIAnalysisService:
                 })
 
         if not relevant_posts:
+            logger.warning("[Pipeline] Zero posts remained after relevance filtering, serving dynamic fallback.")
             return generate_dynamic_fallback(topic)
 
         # Calculate exact 100% sentiment breakdown
@@ -261,7 +273,6 @@ class AIAnalysisService:
         # AI Insight
         insight = await self.generate_insight_with_gemini(topic, pos_pct, neu_pct, neg_pct, key_topics)
         if not insight:
-            # Deterministic grounded fallback insight
             top_pos = key_topics[0]["name"] if key_topics else "Quality"
             top_neg = next((t["name"] for t in key_topics if t["sentiment"] == "Negative"), "Pricing")
             insight = (
@@ -269,6 +280,7 @@ class AIAnalysisService:
                 f"principally led by {top_pos}. Critical feedback ({neg_pct}%) primarily references {top_neg}."
             )
 
+        logger.info(f"[Pipeline] Successfully generated live YouTube + Gemini analysis for '{topic}'. Source: live_youtube_gemini")
         return {
             "topic": topic,
             "analysis": {

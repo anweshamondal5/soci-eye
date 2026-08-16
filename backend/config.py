@@ -11,8 +11,8 @@ class Settings:
     PROJECT_TAGLINE: str = "Understand what people really think."
     VERSION: str = "1.0.0"
     
-    YOUTUBE_API_KEY: str = os.getenv("YOUTUBE_API_KEY", "").strip()
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
+    YOUTUBE_API_KEY: str = os.getenv("YOUTUBE_API_KEY", "").strip().strip("'").strip('"')
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip().strip("'").strip('"')
     
     MAX_VIDEOS: int = int(os.getenv("MAX_VIDEOS", "5"))
     MAX_COMMENTS_PER_VIDEO: int = int(os.getenv("MAX_COMMENTS_PER_VIDEO", "20"))

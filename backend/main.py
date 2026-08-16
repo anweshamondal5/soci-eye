@@ -75,23 +75,25 @@ async def analyze_topic_get(topic: str = Query(..., min_length=1, description="T
         # If both live keys are present, execute the full real-time pipeline
         if settings.has_youtube_key and settings.has_gemini_key:
             try:
+                logger.info(f"[Pipeline] Starting live retrieval for '{clean_topic}' using YouTube and Gemini...")
                 raw_comments = await youtube_service.fetch_social_conversations(
                     topic=clean_topic,
                     max_videos=settings.MAX_VIDEOS,
                     max_comments_per_video=settings.MAX_COMMENTS_PER_VIDEO
                 )
                 if raw_comments:
+                    logger.info(f"[Pipeline] Passing {len(raw_comments)} YouTube comments to Gemini...")
                     result = await ai_service.analyze_social_intelligence(clean_topic, raw_comments)
                     return result
                 else:
-                    logger.info(f"No public comments found for topic '{clean_topic}'. Using dynamic intelligence.")
+                    logger.warning(f"[Pipeline] YouTube returned 0 comments for '{clean_topic}'. Using dynamic intelligence.")
                     return generate_dynamic_fallback(clean_topic)
             except Exception as live_err:
-                logger.warning(f"Live analysis pipeline encountered: {live_err}. Applying dynamic fallback.")
+                logger.error(f"[Pipeline] Live pipeline error: {live_err}. Applying dynamic fallback.", exc_info=True)
                 return generate_dynamic_fallback(clean_topic)
         else:
             # Keys not configured yet - deliver realistic dynamic topic intelligence
-            logger.info("API keys not configured. Serving dynamic topic intelligence engine.")
+            logger.info("[Pipeline] Live API keys not configured. Serving dynamic topic intelligence engine.")
             return generate_dynamic_fallback(clean_topic)
 
     except HTTPException:

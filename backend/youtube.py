@@ -15,8 +15,9 @@ class YouTubeService:
         Search for YouTube videos matching the given query topic.
         Returns a list of video metadata dictionaries.
         """
-        if not self.api_key:
-            logger.warning("YouTube API key is missing.")
+        key = self.api_key or settings.YOUTUBE_API_KEY
+        if not key:
+            logger.warning("[YouTube] No API key configured.")
             return []
 
         url = f"{self.base_url}/search"
@@ -26,24 +27,29 @@ class YouTubeService:
             "type": "video",
             "maxResults": min(max_results, 10),
             "order": "relevance",
-            "key": self.api_key
+            "key": key
         }
 
+        logger.info(f"[YouTube] Initiating video search for query: '{query}'")
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 response = await client.get(url, params=params)
                 
-                if response.status_code == 403:
-                    error_data = response.json().get("error", {})
-                    message = error_data.get("message", "YouTube API quota exceeded or unauthorized.")
-                    logger.error(f"YouTube API 403 Forbidden: {message}")
-                    raise RuntimeError(f"YouTube API quota exceeded or key invalid: {message}")
+                if response.status_code != 200:
+                    try:
+                        err_json = response.json()
+                        err_msg = err_json.get("error", {}).get("message", response.text[:200])
+                    except Exception:
+                        err_msg = response.text[:200]
+                    logger.error(f"[YouTube] Search request failed with HTTP {response.status_code}: {err_msg}")
+                    return []
 
-                response.raise_for_status()
                 data = response.json()
+                items = data.get("items", [])
+                logger.info(f"[YouTube] Search succeeded: {len(items)} videos found.")
 
                 videos = []
-                for item in data.get("items", []):
+                for item in items:
                     id_obj = item.get("id", {})
                     video_id = id_obj.get("videoId")
                     snippet = item.get("snippet", {})
@@ -59,19 +65,17 @@ class YouTubeService:
                             "video_url": f"https://www.youtube.com/watch?v={video_id}"
                         })
                 return videos
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"HTTP error searching YouTube: {exc}")
-            raise
         except Exception as exc:
-            logger.error(f"Error fetching YouTube videos: {exc}")
-            raise
+            logger.error(f"[YouTube] Exception during video search: {exc}")
+            return []
 
     async def get_video_comments(self, video_id: str, video_title: str, channel_title: str, max_comments: int = 20) -> List[Dict[str, Any]]:
         """
         Retrieve public top-level comments for a given video ID.
         Gracefully handles disabled comments and API limits.
         """
-        if not self.api_key:
+        key = self.api_key or settings.YOUTUBE_API_KEY
+        if not key:
             return []
 
         url = f"{self.base_url}/commentThreads"
@@ -81,30 +85,33 @@ class YouTubeService:
             "maxResults": min(max_comments, 50),
             "textFormat": "plainText",
             "order": "relevance",
-            "key": self.api_key
+            "key": key
         }
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, params=params)
                 
-                # Check for comments disabled or 403 on comments
                 if response.status_code in (403, 404):
-                    err_json = response.json().get("error", {})
-                    errors = err_json.get("errors", [])
-                    reasons = [e.get("reason") for e in errors]
-                    if "commentsDisabled" in reasons or "processingFailure" in reasons:
-                        logger.info(f"Comments are disabled for video {video_id}.")
-                        return []
-                    # Otherwise log warning and continue
-                    logger.warning(f"Failed to get comments for {video_id}: {err_json.get('message')}")
+                    try:
+                        err_json = response.json().get("error", {})
+                        reasons = [e.get("reason") for e in err_json.get("errors", [])]
+                        if "commentsDisabled" in reasons or "processingFailure" in reasons:
+                            logger.info(f"[YouTube] Comments disabled on video {video_id}.")
+                            return []
+                        logger.warning(f"[YouTube] Comment retrieval returned HTTP {response.status_code}: {err_json.get('message')}")
+                    except Exception:
+                        pass
                     return []
 
-                response.raise_for_status()
-                data = response.json()
+                if response.status_code != 200:
+                    logger.warning(f"[YouTube] CommentThreads for {video_id} returned HTTP {response.status_code}")
+                    return []
 
+                data = response.json()
+                items = data.get("items", [])
                 comments = []
-                for item in data.get("items", []):
+                for item in items:
                     top_comment = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
                     text = top_comment.get("textDisplay", "").strip()
                     author = top_comment.get("authorDisplayName", "Anonymous")
@@ -125,7 +132,7 @@ class YouTubeService:
                         })
                 return comments
         except Exception as exc:
-            logger.warning(f"Skipping comments for video {video_id} due to: {exc}")
+            logger.warning(f"[YouTube] Skipping comments for video {video_id} due to: {exc}")
             return []
 
     async def fetch_social_conversations(self, topic: str, max_videos: int = 5, max_comments_per_video: int = 20) -> List[Dict[str, Any]]:
@@ -134,6 +141,7 @@ class YouTubeService:
         """
         videos = await self.search_videos(topic, max_results=max_videos)
         if not videos:
+            logger.warning(f"[YouTube] No videos retrieved for topic '{topic}'.")
             return []
 
         all_comments = []
@@ -146,7 +154,7 @@ class YouTubeService:
             )
             all_comments.extend(comments)
 
-        logger.info(f"Retrieved {len(all_comments)} comments across {len(videos)} videos for topic '{topic}'.")
+        logger.info(f"[YouTube] Successfully retrieved {len(all_comments)} comments across {len(videos)} videos for '{topic}'.")
         return all_comments
 
 youtube_service = YouTubeService()
